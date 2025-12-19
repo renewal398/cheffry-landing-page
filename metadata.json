@@ -1,0 +1,7 @@
+{
+  "name": "Cheffry",
+  "description": "An AI-powered cooking platform that helps users decide what to cook based on ingredients, personal preferences, and local cuisine.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
