@@ -596,3 +596,438 @@ export const isValidPrice = (price: number): boolean => {
 ---
 
 ### Continue to Part 2 for remaining files (Services, Hooks, Context, Components, Pages)...
+
+// ============================================
+// PART 2: SERVICES, HOOKS, CONTEXT
+// ============================================
+
+// ============================================
+// 19. src/services/api.service.ts
+// ============================================
+import axios, { AxiosInstance, AxiosError } from 'axios';
+import { API_BASE_URL } from '@/utils/constants';
+import type { Filters } from '@/types/filter.types';
+import type { 
+  ListingResponse, 
+  SingleListingResponse 
+} from '@/types/listing.types';
+
+class ApiService {
+  private api: AxiosInstance;
+
+  constructor() {
+    this.api = axios.create({
+      baseURL: API_BASE_URL,
+      timeout: 10000,
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    });
+
+    // Request interceptor
+    this.api.interceptors.request.use(
+      (config) => {
+        // Add any auth tokens here if needed in future
+        return config;
+      },
+      (error) => {
+        return Promise.reject(error);
+      }
+    );
+
+    // Response interceptor
+    this.api.interceptors.response.use(
+      (response) => response,
+      (error: AxiosError) => {
+        if (error.response) {
+          // Server responded with error
+          console.error('API Error:', error.response.data);
+        } else if (error.request) {
+          // Request made but no response
+          console.error('Network Error:', error.message);
+        } else {
+          console.error('Error:', error.message);
+        }
+        return Promise.reject(error);
+      }
+    );
+  }
+
+  async getListings(filters?: Partial<Filters>): Promise<ListingResponse> {
+    const params = new URLSearchParams();
+    
+    if (filters?.location) params.append('location', filters.location);
+    if (filters?.minPrice) params.append('minPrice', filters.minPrice.toString());
+    if (filters?.maxPrice && filters.maxPrice !== Infinity) {
+      params.append('maxPrice', filters.maxPrice.toString());
+    }
+    if (filters?.rooms) params.append('rooms', filters.rooms.toString());
+    if (filters?.availability) params.append('availability', filters.availability);
+    if (filters?.search) params.append('search', filters.search);
+
+    const response = await this.api.get<ListingResponse>(`/listings?${params}`);
+    return response.data;
+  }
+
+  async getListing(id: string): Promise<SingleListingResponse> {
+    const response = await this.api.get<SingleListingResponse>(`/listings/${id}`);
+    return response.data;
+  }
+
+  async healthCheck(): Promise<boolean> {
+    try {
+      const response = await this.api.get('/health');
+      return response.status === 200;
+    } catch {
+      return false;
+    }
+  }
+}
+
+export const apiService = new ApiService();
+
+// ============================================
+// 20. src/services/payment.service.ts
+// ============================================
+import axios from 'axios';
+import { API_BASE_URL, PAYSTACK_PUBLIC_KEY } from '@/utils/constants';
+import type {
+  PaymentInitializeRequest,
+  PaymentInitializeResponse,
+  PaymentVerifyResponse,
+  PaystackResponse,
+} from '@/types/payment.types';
+
+class PaymentService {
+  async initializePayment(
+    data: PaymentInitializeRequest
+  ): Promise<PaymentInitializeResponse> {
+    const response = await axios.post<PaymentInitializeResponse>(
+      `${API_BASE_URL}/payment/initialize`,
+      data
+    );
+    return response.data;
+  }
+
+  async verifyPayment(reference: string): Promise<PaymentVerifyResponse> {
+    const response = await axios.get<PaymentVerifyResponse>(
+      `${API_BASE_URL}/payment/verify/${reference}`
+    );
+    return response.data;
+  }
+
+  openPaystackPopup(
+    email: string,
+    amount: number,
+    reference: string,
+    onSuccess: (response: PaystackResponse) => void,
+    onClose: () => void
+  ): void {
+    // @ts-ignore - Paystack is loaded via script tag
+    const handler = window.PaystackPop.setup({
+      key: PAYSTACK_PUBLIC_KEY,
+      email: email,
+      amount: amount * 100, // Convert to kobo
+      ref: reference,
+      currency: 'NGN',
+      onClose: onClose,
+      callback: (response: PaystackResponse) => {
+        onSuccess(response);
+      },
+    });
+
+    handler.openIframe();
+  }
+
+  loadPaystackScript(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      // Check if script already loaded
+      // @ts-ignore
+      if (window.PaystackPop) {
+        resolve();
+        return;
+      }
+
+      const script = document.createElement('script');
+      script.src = 'https://js.paystack.co/v1/inline.js';
+      script.async = true;
+      script.onload = () => resolve();
+      script.onerror = () => reject(new Error('Failed to load Paystack script'));
+      document.head.appendChild(script);
+    });
+  }
+}
+
+export const paymentService = new PaymentService();
+
+// ============================================
+// 21. src/services/whatsapp.service.ts
+// ============================================
+import { generateWhatsAppUrl, getWhatsAppMessage } from '@/utils/format.utils';
+
+class WhatsAppService {
+  redirectToWhatsApp(
+    phone: string,
+    listingTitle: string,
+    location: string,
+    paymentReference?: string
+  ): void {
+    const message = getWhatsAppMessage(listingTitle, location, paymentReference);
+    const url = generateWhatsAppUrl(phone, message);
+    window.open(url, '_blank', 'noopener,noreferrer');
+  }
+
+  isWhatsAppAvailable(): boolean {
+    return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+      navigator.userAgent
+    );
+  }
+}
+
+export const whatsAppService = new WhatsAppService();
+
+// ============================================
+// 22. src/hooks/useListings.ts
+// ============================================
+import { useState, useEffect, useCallback } from 'react';
+import { apiService } from '@/services/api.service';
+import type { Listing } from '@/types/listing.types';
+import type { Filters } from '@/types/filter.types';
+import { MESSAGES } from '@/utils/constants';
+
+interface UseListingsReturn {
+  listings: Listing[];
+  loading: boolean;
+  error: string | null;
+  refetch: () => Promise<void>;
+  applyFilters: (filters: Partial<Filters>) => Promise<void>;
+}
+
+export const useListings = (): UseListingsReturn => {
+  const [listings, setListings] = useState<Listing[]>([]);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [error, setError] = useState<string | null>(null);
+  const [currentFilters, setCurrentFilters] = useState<Partial<Filters>>({});
+
+  const fetchListings = useCallback(async (filters?: Partial<Filters>) => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const response = await apiService.getListings(filters);
+      setListings(response.data);
+    } catch (err) {
+      setError(MESSAGES.ERROR.FETCH_LISTINGS);
+      console.error('Error fetching listings:', err);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const applyFilters = useCallback(async (filters: Partial<Filters>) => {
+    setCurrentFilters(filters);
+    await fetchListings(filters);
+  }, [fetchListings]);
+
+  const refetch = useCallback(async () => {
+    await fetchListings(currentFilters);
+  }, [fetchListings, currentFilters]);
+
+  useEffect(() => {
+    fetchListings();
+  }, [fetchListings]);
+
+  return {
+    listings,
+    loading,
+    error,
+    refetch,
+    applyFilters,
+  };
+};
+
+// ============================================
+// 23. src/hooks/usePayment.ts
+// ============================================
+import { useState, useCallback, useEffect } from 'react';
+import { paymentService } from '@/services/payment.service';
+import type { PaymentStatus, PaystackResponse } from '@/types/payment.types';
+import { MESSAGES } from '@/utils/constants';
+
+interface UsePaymentProps {
+  listingId: string;
+  amount: number;
+  onSuccess?: (reference: string) => void;
+  onError?: (error: string) => void;
+}
+
+interface UsePaymentReturn {
+  status: PaymentStatus;
+  error: string | null;
+  initiatePayment: (email: string) => Promise<void>;
+  verifyPayment: (reference: string) => Promise<boolean>;
+  resetPayment: () => void;
+}
+
+export const usePayment = ({
+  listingId,
+  amount,
+  onSuccess,
+  onError,
+}: UsePaymentProps): UsePaymentReturn => {
+  const [status, setStatus] = useState<PaymentStatus>('idle');
+  const [error, setError] = useState<string | null>(null);
+  const [scriptLoaded, setScriptLoaded] = useState(false);
+
+  useEffect(() => {
+    paymentService
+      .loadPaystackScript()
+      .then(() => setScriptLoaded(true))
+      .catch(() => {
+        setError('Failed to load payment system');
+      });
+  }, []);
+
+  const initiatePayment = useCallback(
+    async (email: string) => {
+      if (!scriptLoaded) {
+        setError('Payment system not ready. Please try again.');
+        return;
+      }
+
+      setStatus('pending');
+      setError(null);
+
+      try {
+        const response = await paymentService.initializePayment({
+          listingId,
+          email,
+          amount,
+        });
+
+        if (response.success) {
+          // Open Paystack popup
+          paymentService.openPaystackPopup(
+            email,
+            amount,
+            response.data.reference,
+            async (paystackResponse: PaystackResponse) => {
+              // Payment successful
+              const verified = await verifyPayment(paystackResponse.reference);
+              if (verified) {
+                setStatus('success');
+                onSuccess?.(paystackResponse.reference);
+              } else {
+                setStatus('failed');
+                setError('Payment verification failed');
+                onError?.('Payment verification failed');
+              }
+            },
+            () => {
+              // User closed popup
+              setStatus('idle');
+            }
+          );
+        } else {
+          throw new Error(response.message);
+        }
+      } catch (err) {
+        setStatus('failed');
+        const errorMessage = err instanceof Error ? err.message : MESSAGES.ERROR.PAYMENT_INIT;
+        setError(errorMessage);
+        onError?.(errorMessage);
+      }
+    },
+    [listingId, amount, onSuccess, onError, scriptLoaded]
+  );
+
+  const verifyPayment = useCallback(async (reference: string): Promise<boolean> => {
+    try {
+      const response = await paymentService.verifyPayment(reference);
+      return response.success && response.data.status === 'success';
+    } catch (err) {
+      console.error('Payment verification error:', err);
+      return false;
+    }
+  }, []);
+
+  const resetPayment = useCallback(() => {
+    setStatus('idle');
+    setError(null);
+  }, []);
+
+  return {
+    status,
+    error,
+    initiatePayment,
+    verifyPayment,
+    resetPayment,
+  };
+};
+
+// ============================================
+// 24. src/hooks/useToast.ts
+// ============================================
+import { useContext } from 'react';
+import { ToastContext } from '@/context/ToastContext';
+
+export const useToast = () => {
+  const context = useContext(ToastContext);
+  
+  if (!context) {
+    throw new Error('useToast must be used within ToastProvider');
+  }
+  
+  return context;
+};
+
+// ============================================
+// 25. src/context/ToastContext.tsx
+// ============================================
+import React, { createContext, useState, useCallback, ReactNode } from 'react';
+
+export type ToastType = 'success' | 'error' | 'info' | 'warning';
+
+interface Toast {
+  id: string;
+  message: string;
+  type: ToastType;
+}
+
+interface ToastContextType {
+  toasts: Toast[];
+  showToast: (message: string, type?: ToastType) => void;
+  removeToast: (id: string) => void;
+}
+
+export const ToastContext = createContext<ToastContextType | undefined>(undefined);
+
+interface ToastProviderProps {
+  children: ReactNode;
+}
+
+export const ToastProvider: React.FC<ToastProviderProps> = ({ children }) => {
+  const [toasts, setToasts] = useState<Toast[]>([]);
+
+  const showToast = useCallback((message: string, type: ToastType = 'info') => {
+    const id = Date.now().toString();
+    const newToast: Toast = { id, message, type };
+    
+    setToasts((prev) => [...prev, newToast]);
+
+    // Auto remove after 5 seconds
+    setTimeout(() => {
+      removeToast(id);
+    }, 5000);
+  }, []);
+
+  const removeToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((toast) => toast.id !== id));
+  }, []);
+
+  return (
+    <ToastContext.Provider value={{ toasts, showToast, removeToast }}>
+      {children}
+    </ToastContext.Provider>
+  );
+};
